@@ -9,8 +9,16 @@ import lombok.extern.slf4j.Slf4j;
 import net.sourceforge.tess4j.Tesseract;
 import org.example.smartlearning.dto.response.ScanGradingResponse;
 import org.example.smartlearning.entity.AiGradingRecord;
+import org.example.smartlearning.entity.KnowledgeMastery;
+import org.example.smartlearning.entity.KnowledgePoint;
+import org.example.smartlearning.entity.Subject;
+import org.example.smartlearning.exception.BusinessException;
 import org.example.smartlearning.mapper.AiGradingRecordMapper;
+import org.example.smartlearning.mapper.KnowledgeMasteryMapper;
+import org.example.smartlearning.mapper.KnowledgePointMapper;
+import org.example.smartlearning.mapper.SubjectMapper;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
 import javax.imageio.ImageIO;
@@ -23,9 +31,12 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 
 /**
  * 试卷扫描判卷服务
@@ -38,18 +49,24 @@ public class PaperScanService {
 
     private final ClaudeService claudeService;
     private final AiGradingRecordMapper aiGradingRecordMapper;
+    private final SubjectMapper subjectMapper;
+    private final KnowledgePointMapper knowledgePointMapper;
+    private final KnowledgeMasteryMapper knowledgeMasteryMapper;
 
     /**
      * 扫描试卷图片并判卷
      */
+    @Transactional
     public ScanGradingResponse scanAndGrade(Long userId, MultipartFile file, Long subjectId, String grade) {
+        AiGradingRecord record = userId == null ? null : createProcessingRecord(userId, file, grade);
         try {
             // 1. 使用 OCR 提取图片中的文字
             String ocrText = extractTextFromImage(file);
             log.info("OCR识别结果: {}", ocrText);
+            updateProcessingRecordOcr(record, ocrText);
 
             if (ocrText == null || ocrText.trim().isEmpty()) {
-                throw new RuntimeException("无法识别图片内容，请确保图片清晰");
+                throw BusinessException.of("无法识别图片内容，请确保图片清晰、文字完整且不要倾斜");
             }
 
             // 2. 调用 DeepSeek AI 分析试卷内容
@@ -57,16 +74,31 @@ public class PaperScanService {
 
             // 3. 解析 AI 响应
             ScanGradingResponse result = parseGradingResult(aiResponse);
+            if ("FAILED".equals(result.getStatus())) {
+                throw BusinessException.of(result.getErrorMessage() == null
+                        ? "AI返回结果解析失败，请重新上传或稍后再试"
+                        : result.getErrorMessage());
+            }
+            result.setOcrText(ocrText);
+            result.setStatus("SUCCESS");
+            syncScanKnowledgeMastery(userId, subjectId, result);
 
             // 4. 保存 AI 判卷记录，供页面历史记录查看
-            if (userId != null) {
-                saveGradingRecord(userId, file, result);
-            }
+            finishGradingRecord(record, file, result);
             return result;
 
         } catch (IOException e) {
             log.error("读取图片失败", e);
-            throw new RuntimeException("读取图片失败: " + e.getMessage());
+            markGradingRecordFailed(record, "读取图片失败：" + friendlyMessage(e));
+            throw BusinessException.of("读取图片失败，请重新上传清晰图片");
+        } catch (BusinessException e) {
+            markGradingRecordFailed(record, e.getMessage());
+            throw e;
+        } catch (Exception e) {
+            log.error("AI判卷失败", e);
+            String message = friendlyMessage(e);
+            markGradingRecordFailed(record, message);
+            throw BusinessException.of(message);
         }
     }
 
@@ -114,7 +146,7 @@ public class PaperScanService {
 
         } catch (Exception e) {
             log.error("OCR识别失败", e);
-            throw new RuntimeException("OCR识别失败: " + e.getMessage());
+            throw BusinessException.of("OCR识别失败，请确认图片清晰、文字无遮挡，或换一张图片重试");
         }
     }
 
@@ -307,6 +339,8 @@ public class PaperScanService {
             response.setAccuracyRate(BigDecimal.ZERO);
             response.setCorrectCount(0);
             response.setWrongCount(0);
+            response.setStatus("FAILED");
+            response.setErrorMessage("AI返回结果解析失败，请重新上传或稍后再试");
         }
 
         return response;
@@ -334,6 +368,8 @@ public class PaperScanService {
             item.put("correctCount", record.getCorrectCount());
             item.put("wrongCount", record.getWrongCount());
             item.put("originalFileName", record.getOriginalFileName());
+            item.put("status", record.getStatus());
+            item.put("errorMessage", record.getErrorMessage());
             item.put("createdAt", record.getCreatedAt());
             result.add(item);
         }
@@ -359,9 +395,38 @@ public class PaperScanService {
         return response;
     }
 
-    private void saveGradingRecord(Long userId, MultipartFile file, ScanGradingResponse result) {
+    private AiGradingRecord createProcessingRecord(Long userId, MultipartFile file, String grade) {
         AiGradingRecord record = new AiGradingRecord();
         record.setUserId(userId);
+        record.setTitle("AI判卷中 - " + defaultFileName(file));
+        record.setGrade(grade);
+        record.setTotalScore(BigDecimal.ZERO);
+        record.setMaxScore(BigDecimal.ZERO);
+        record.setAccuracyRate(BigDecimal.ZERO);
+        record.setCorrectCount(0);
+        record.setWrongCount(0);
+        record.setResultJson("{}");
+        record.setOriginalFileName(file.getOriginalFilename());
+        record.setStatus("PROCESSING");
+        record.setCreatedAt(LocalDateTime.now());
+        record.setUpdatedAt(LocalDateTime.now());
+        aiGradingRecordMapper.insert(record);
+        return record;
+    }
+
+    private void updateProcessingRecordOcr(AiGradingRecord record, String ocrText) {
+        if (record == null) {
+            return;
+        }
+        record.setOcrText(ocrText);
+        record.setUpdatedAt(LocalDateTime.now());
+        aiGradingRecordMapper.updateById(record);
+    }
+
+    private void finishGradingRecord(AiGradingRecord record, MultipartFile file, ScanGradingResponse result) {
+        if (record == null) {
+            return;
+        }
         record.setTitle(buildRecordTitle(result, file));
         record.setSubject(result.getSubject());
         record.setGrade(result.getGrade());
@@ -372,15 +437,50 @@ public class PaperScanService {
         record.setWrongCount(result.getWrongCount() == null ? 0 : result.getWrongCount());
         record.setResultJson(JSON.toJSONString(result));
         record.setOriginalFileName(file.getOriginalFilename());
-        record.setCreatedAt(LocalDateTime.now());
-        aiGradingRecordMapper.insert(record);
+        record.setOcrText(result.getOcrText());
+        record.setStatus("SUCCESS");
+        record.setErrorMessage(null);
+        record.setUpdatedAt(LocalDateTime.now());
+        aiGradingRecordMapper.updateById(record);
         attachRecordMetadata(result, record);
+    }
+
+    private void markGradingRecordFailed(AiGradingRecord record, String message) {
+        if (record == null) {
+            return;
+        }
+        ScanGradingResponse failed = new ScanGradingResponse();
+        failed.setRecordId(record.getId());
+        failed.setTitle(record.getTitle());
+        failed.setCreatedAt(record.getCreatedAt());
+        failed.setSubject(record.getSubject());
+        failed.setGrade(record.getGrade());
+        failed.setStatus("FAILED");
+        failed.setErrorMessage(message);
+        failed.setOcrText(record.getOcrText());
+        failed.setQuestions(new ArrayList<>());
+        failed.setErrorPoints(new ArrayList<>());
+        failed.setTotalScore(BigDecimal.ZERO);
+        failed.setMaxScore(BigDecimal.ZERO);
+        failed.setAccuracyRate(BigDecimal.ZERO);
+        failed.setCorrectCount(0);
+        failed.setWrongCount(0);
+        failed.setAiSummary(message);
+
+        record.setStatus("FAILED");
+        record.setErrorMessage(message);
+        record.setResultJson(JSON.toJSONString(failed));
+        record.setUpdatedAt(LocalDateTime.now());
+        aiGradingRecordMapper.updateById(record);
     }
 
     private void attachRecordMetadata(ScanGradingResponse response, AiGradingRecord record) {
         response.setRecordId(record.getId());
         response.setTitle(record.getTitle());
         response.setCreatedAt(record.getCreatedAt());
+        response.setStatus(record.getStatus());
+        response.setErrorMessage(record.getErrorMessage());
+        response.setOcrText(response.getOcrText() == null ? record.getOcrText() : response.getOcrText());
         response.setSubject(response.getSubject() == null ? record.getSubject() : response.getSubject());
         response.setGrade(response.getGrade() == null ? record.getGrade() : response.getGrade());
         response.setTotalScore(response.getTotalScore() == null ? record.getTotalScore() : response.getTotalScore());
@@ -392,15 +492,145 @@ public class PaperScanService {
 
     private String buildRecordTitle(ScanGradingResponse result, MultipartFile file) {
         String subject = result.getSubject() == null || result.getSubject().isBlank() ? "AI" : result.getSubject();
-        String filename = file.getOriginalFilename();
-        if (filename == null || filename.isBlank()) {
+        String filename = defaultFileName(file);
+        if (filename.isBlank()) {
             return subject + "判卷记录";
         }
         return subject + "判卷 - " + filename;
     }
 
+    private String defaultFileName(MultipartFile file) {
+        String filename = file == null ? null : file.getOriginalFilename();
+        return filename == null || filename.isBlank() ? "上传图片" : filename;
+    }
+
     private BigDecimal defaultDecimal(BigDecimal value) {
         return value == null ? BigDecimal.ZERO : value;
+    }
+
+    private void syncScanKnowledgeMastery(Long userId, Long explicitSubjectId, ScanGradingResponse result) {
+        if (userId == null || result == null || result.getQuestions() == null || result.getQuestions().isEmpty()) {
+            return;
+        }
+        Long subjectId = resolveSubjectId(explicitSubjectId, result.getSubject());
+        if (subjectId == null) {
+            return;
+        }
+        List<KnowledgePoint> subjectPoints = knowledgePointMapper.selectList(
+                new LambdaQueryWrapper<KnowledgePoint>()
+                        .eq(KnowledgePoint::getSubjectId, subjectId)
+        );
+        if (subjectPoints.isEmpty()) {
+            return;
+        }
+
+        for (ScanGradingResponse.RecognizedQuestion question : result.getQuestions()) {
+            Set<Long> knowledgeIds = resolveScanKnowledgeIds(question.getKnowledgePoints(), subjectPoints);
+            for (Long knowledgeId : knowledgeIds) {
+                updateMasteryFromScan(userId, knowledgeId, Boolean.TRUE.equals(question.getIsCorrect()));
+            }
+        }
+    }
+
+    private Long resolveSubjectId(Long explicitSubjectId, String subjectName) {
+        if (explicitSubjectId != null) {
+            return explicitSubjectId;
+        }
+        if (subjectName == null || subjectName.isBlank()) {
+            return null;
+        }
+        Subject subject = subjectMapper.selectOne(
+                new LambdaQueryWrapper<Subject>()
+                        .eq(Subject::getName, subjectName.trim())
+                        .last("LIMIT 1")
+        );
+        if (subject != null) {
+            return subject.getId();
+        }
+        List<Subject> subjects = subjectMapper.selectList(new LambdaQueryWrapper<>());
+        return subjects.stream()
+                .filter(item -> item.getName() != null
+                        && (subjectName.contains(item.getName()) || item.getName().contains(subjectName)))
+                .map(Subject::getId)
+                .findFirst()
+                .orElse(null);
+    }
+
+    private Set<Long> resolveScanKnowledgeIds(String knowledgePoints, List<KnowledgePoint> subjectPoints) {
+        if (knowledgePoints == null || knowledgePoints.isBlank()) {
+            return Set.of();
+        }
+        Set<Long> ids = new LinkedHashSet<>();
+        String[] tokens = knowledgePoints.split("[,，、;；/\\n]");
+        for (String token : tokens) {
+            String normalized = token.trim();
+            if (normalized.isBlank()) {
+                continue;
+            }
+            subjectPoints.stream()
+                    .filter(point -> point.getName() != null)
+                    .filter(point -> Objects.equals(point.getName(), normalized)
+                            || normalized.contains(point.getName())
+                            || point.getName().contains(normalized))
+                    .map(KnowledgePoint::getId)
+                    .findFirst()
+                    .ifPresent(ids::add);
+        }
+        return ids;
+    }
+
+    private void updateMasteryFromScan(Long userId, Long knowledgeId, boolean isCorrect) {
+        KnowledgeMastery mastery = knowledgeMasteryMapper.selectOne(
+                new LambdaQueryWrapper<KnowledgeMastery>()
+                        .eq(KnowledgeMastery::getUserId, userId)
+                        .eq(KnowledgeMastery::getKnowledgeId, knowledgeId)
+                        .last("LIMIT 1")
+        );
+        if (mastery == null) {
+            mastery = new KnowledgeMastery();
+            mastery.setUserId(userId);
+            mastery.setKnowledgeId(knowledgeId);
+            mastery.setTotalQuestions(0);
+            mastery.setCorrectQuestions(0);
+            mastery.setCreatedAt(LocalDateTime.now());
+        }
+
+        int total = mastery.getTotalQuestions() == null ? 0 : mastery.getTotalQuestions();
+        int correct = mastery.getCorrectQuestions() == null ? 0 : mastery.getCorrectQuestions();
+        total++;
+        if (isCorrect) {
+            correct++;
+        }
+        mastery.setTotalQuestions(total);
+        mastery.setCorrectQuestions(correct);
+        mastery.setMasteryLevel(BigDecimal.valueOf(correct)
+                .multiply(BigDecimal.valueOf(100))
+                .divide(BigDecimal.valueOf(total), 2, RoundingMode.HALF_UP));
+        mastery.setLastPracticeAt(LocalDateTime.now());
+        mastery.setUpdatedAt(LocalDateTime.now());
+
+        if (mastery.getId() == null) {
+            knowledgeMasteryMapper.insert(mastery);
+        } else {
+            knowledgeMasteryMapper.updateById(mastery);
+        }
+    }
+
+    private String friendlyMessage(Exception e) {
+        String raw = e.getMessage() == null ? "" : e.getMessage();
+        if (raw.contains("API Key") || raw.contains("DEEPSEEK_API_KEY") || raw.contains("claude.api-key")) {
+            return "AI服务未配置API Key，请先配置 DEEPSEEK_API_KEY 后再判卷";
+        }
+        if (raw.contains("timeout") || raw.contains("timed out")) {
+            return "AI服务响应超时，请稍后重试";
+        }
+        if (raw.contains("OCR")) {
+            return "OCR识别失败，请确认图片清晰、文字无遮挡，或换一张图片重试";
+        }
+        if (raw.isBlank()) {
+            return "AI判卷失败，请稍后重试";
+        }
+        return raw.length() > 120 ? raw.substring(0, 120) : raw;
     }
 
     /**

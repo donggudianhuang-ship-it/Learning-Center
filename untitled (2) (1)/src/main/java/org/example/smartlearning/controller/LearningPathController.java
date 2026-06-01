@@ -40,6 +40,19 @@ public class LearningPathController {
         return ApiResponse.success(learningPathService.getPersonalizedPath(userId));
     }
 
+    @GetMapping("/tasks")
+    public ApiResponse<List<Map<String, Object>>> getLearningTasks(@AuthenticationPrincipal Long userId) {
+        return ApiResponse.success(learningPathService.getLearningTasks(userId));
+    }
+
+    @PutMapping("/tasks/{taskId}/complete")
+    public ApiResponse<Void> completeLearningTask(
+            @AuthenticationPrincipal Long userId,
+            @PathVariable("taskId") Long taskId) {
+        learningPathService.completeLearningTask(userId, taskId);
+        return ApiResponse.success();
+    }
+
     @GetMapping("/review-plan")
     public ApiResponse<Map<String, Object>> getReviewPlan(@AuthenticationPrincipal Long userId) {
         return ApiResponse.success(learningPathService.generateReviewPlan(userId));

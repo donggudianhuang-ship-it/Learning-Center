@@ -479,6 +479,59 @@
             gap: 15px;
             margin-top: 18px;
         }
+        .task-card {
+            background: #f8fafc;
+            border-radius: 8px;
+            padding: 16px;
+            border: 1px solid transparent;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .task-card:hover {
+            border-color: #667eea;
+            background: #f5f7ff;
+        }
+        .task-card.completed {
+            opacity: 0.65;
+        }
+        .task-actions {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            margin-top: 12px;
+        }
+        .scan-status {
+            margin-top: 16px;
+            padding: 12px 14px;
+            border-radius: 8px;
+            background: #eef2ff;
+            color: #667eea;
+            font-size: 14px;
+        }
+        .report-tabs {
+            display: flex;
+            gap: 8px;
+        }
+        .report-tabs button {
+            border: 1px solid #dcdfe6;
+            background: #f5f7fb;
+            color: #606266;
+            padding: 7px 14px;
+            border-radius: 6px;
+            cursor: pointer;
+        }
+        .report-tabs button.active {
+            border-color: #667eea;
+            background: #eef2ff;
+            color: #667eea;
+            font-weight: 600;
+        }
+        .report-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+        }
         .mini-label {
             color: #909399;
             font-size: 12px;
@@ -756,6 +809,33 @@
                             <div class="metric-box">
                                 <div class="label">学习时长</div>
                                 <div class="value">{{ learningPath.profile.totalStudyMinutes || 0 }}分钟</div>
+                            </div>
+                        </div>
+                        <div class="task-grid" v-if="learningPath.tasks && learningPath.tasks.length">
+                            <div v-for="task in learningPath.tasks"
+                                 :key="task.id || task.taskKey || task.title"
+                                 class="task-card"
+                                 :class="{completed: task.status === 'COMPLETED'}"
+                                 @click="openLearningTask(task)">
+                                <span class="tag" :class="task.status === 'COMPLETED' ? 'tag-success' : (task.priority === 1 ? 'tag-danger' : 'tag-info')">
+                                    {{ task.status === 'COMPLETED' ? '已完成' : taskTypeName(task.type) }}
+                                </span>
+                                <div class="post-title" style="margin-top: 10px;">{{ task.title }}</div>
+                                <div class="evidence-text">{{ task.description }}</div>
+                                <div class="progress-line" style="margin-top: 12px;">
+                                    <div :style="{width: Math.min(100, Number(task.progress || 0)) + '%'}"></div>
+                                </div>
+                                <div class="task-actions">
+                                    <span class="evidence-text">
+                                        {{ task.estimatedMinutes || 15 }}分钟 · 截止 {{ task.deadline || '本周' }}
+                                    </span>
+                                    <button class="btn-secondary"
+                                            v-if="task.status !== 'COMPLETED'"
+                                            style="padding: 6px 12px; font-size: 13px;"
+                                            @click.stop="completeLearningTask(task)">
+                                        完成
+                                    </button>
+                                </div>
                             </div>
                         </div>
                         </div>
@@ -1153,8 +1233,11 @@
 
                         <div v-if="selectedFile" style="text-align: center; margin-top: 20px;">
                             <button class="btn-primary" @click="uploadAndScan" :disabled="isScanning" style="padding: 12px 40px;">
-                                {{ isScanning ? 'AI识别中...' : '开始识别判卷' }}
+                                {{ isScanning ? scanStatusText : '开始识别判卷' }}
                             </button>
+                        </div>
+                        <div v-if="isScanning" class="scan-status">
+                            {{ scanStatusText }}，请保持页面打开，完成后会自动进入结果页。
                         </div>
 
                         <!-- 判卷记录 -->
@@ -1170,11 +1253,17 @@
                                     <div class="post-title">{{ record.title || 'AI判卷记录' }}</div>
                                     <div class="post-meta">
                                         <span class="tag tag-info">{{ record.subject || '未识别科目' }}</span>
+                                        <span class="tag" :class="record.status === 'FAILED' ? 'tag-danger' : (record.status === 'PROCESSING' ? 'tag-warning' : 'tag-success')">
+                                            {{ gradingStatusName(record.status) }}
+                                        </span>
                                         <span v-if="record.grade">{{ record.grade }}</span>
                                         <span class="tag tag-info">总分 {{ record.totalScore || 0 }}/{{ record.maxScore || 0 }}</span>
                                         <span>正确率: {{ Number(record.accuracyRate || 0).toFixed(1) }}%</span>
                                         <span>{{ record.correctCount || 0 }}/{{ (record.correctCount || 0) + (record.wrongCount || 0) }} 题正确</span>
                                         <span>{{ formatDateTime(record.createdAt) }}</span>
+                                    </div>
+                                    <div v-if="record.status === 'FAILED' && record.errorMessage" class="evidence-text" style="color: #f56c6c; margin-top: 8px;">
+                                        {{ record.errorMessage }}
                                     </div>
                                 </div>
                                 <div v-if="!isLoadingGradingHistory && gradingHistory.length === 0" style="color: #909399; padding: 20px 0;">
@@ -1191,6 +1280,10 @@
                             <button class="btn-secondary" @click="scanResult = null; selectedFile = null; previewUrl = null;">重新上传</button>
                         </div>
 
+                        <div v-if="scanResult.status === 'FAILED'" style="background: #fef0f0; color: #f56c6c; padding: 18px; border-radius: 10px; margin-bottom: 20px;">
+                            {{ scanResult.errorMessage || 'AI判卷失败，请重新上传。' }}
+                        </div>
+
                         <!-- AI识别信息 -->
                         <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 12px; margin-bottom: 20px;">
                             <div style="display: flex; gap: 30px; align-items: center;">
@@ -1204,6 +1297,10 @@
                                 </div>
                             </div>
                         </div>
+                        <details v-if="scanResult.ocrText" style="margin-bottom: 20px;">
+                            <summary style="cursor: pointer; color: #667eea;">查看OCR识别文本</summary>
+                            <pre style="white-space: pre-wrap; background: #f8fafc; padding: 15px; border-radius: 8px; margin-top: 10px; color: #606266;">{{ scanResult.ocrText }}</pre>
+                        </details>
 
                         <!-- 总分统计 -->
                         <div class="dashboard-grid" style="margin-bottom: 20px;">
@@ -1458,21 +1555,12 @@
                             <span>💬 学习社区</span>
                             <button class="btn-primary" @click="showPostModal = true">发布帖子</button>
                         </div>
-                        <div style="display: flex; gap: 10px; margin-bottom: 15px; align-items: center;">
-                            <input type="text" class="form-input" v-model="postKeyword" @keyup.enter="loadPosts"
-                                   placeholder="搜索帖子标题或内容..." style="flex: 1; max-width: 400px;">
-                            <button class="btn-secondary" style="padding: 8px 14px;" @click="loadPosts">🔍 搜索</button>
-                            <select v-model="postSort" @change="loadPosts" class="form-input"
-                                    style="width: auto; padding: 8px 12px;">
-                                <option value="latest">🕐 最新</option>
-                                <option value="hot">🔥 热门</option>
-                            </select>
-                        </div>
                         <div class="post-list">
                             <div class="post-item" v-for="post in posts" :key="post.id" @click="viewPost(post)">
                                 <div class="post-title">{{ post.title }}</div>
                                 <div class="post-meta">
                                     <span>{{ post.authorName }}</span>
+                                    <span>{{ post.viewCount }}次浏览</span>
                                     <span>{{ post.commentCount }}条评论</span>
                                     <button class="btn-secondary" style="padding: 4px 10px; font-size: 12px;" @click.stop="likePost(post)">{{ post.liked ? '❤️' : '👍' }} {{ post.likeCount }}</button>
                                 </div>
@@ -1509,6 +1597,10 @@
                     <div class="content-section">
                         <div class="section-title">
                             <span>📊 学情分析报告</span>
+                            <div class="report-tabs">
+                                <button :class="{active: reportPeriod === 'week'}" @click="loadPeriodReport('week')">周报</button>
+                                <button :class="{active: reportPeriod === 'month'}" @click="loadPeriodReport('month')">月报</button>
+                            </div>
                         </div>
                         <div class="dashboard-grid">
                             <div class="stat-card">
@@ -1537,6 +1629,49 @@
                                 <div class="stat-info">
                                     <h3>{{ formatPercent(analytics.knowledgeCoverage?.coverageRate) }}%</h3>
                                     <p>知识点覆盖率</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="content-section" v-if="periodReport && periodReport.periodName">
+                        <div class="section-title">
+                            <span>🗓️ {{ periodReport.periodName }}</span>
+                            <span style="color: #909399; font-size: 13px;">{{ periodReport.startDate }} 至 {{ periodReport.endDate }}</span>
+                        </div>
+                        <div class="metric-strip" style="margin-bottom: 16px;">
+                            <div class="metric-box">
+                                <div class="label">周期答题</div>
+                                <div class="value">{{ periodReport.questionCount || 0 }}</div>
+                            </div>
+                            <div class="metric-box">
+                                <div class="label">周期正确率</div>
+                                <div class="value">{{ formatPercent(periodReport.accuracyRate) }}%</div>
+                            </div>
+                            <div class="metric-box">
+                                <div class="label">新增错题</div>
+                                <div class="value">{{ periodReport.newMistakeCount || 0 }}</div>
+                            </div>
+                            <div class="metric-box">
+                                <div class="label">学习时长</div>
+                                <div class="value">{{ periodReport.studyMinutes || 0 }}分钟</div>
+                            </div>
+                        </div>
+                        <p style="color: #606266; line-height: 1.8; margin-bottom: 16px;">{{ periodReport.summary }}</p>
+                        <div class="report-grid">
+                            <div class="metric-box">
+                                <div class="post-title">薄弱知识点</div>
+                                <div v-if="periodReport.weakPoints && periodReport.weakPoints.length">
+                                    <div v-for="weak in periodReport.weakPoints" :key="weak.knowledgeId" class="evidence-text" style="margin-top: 8px;">
+                                        {{ weak.knowledgeName }}：错 {{ weak.wrongCount }} / {{ weak.questionCount }}，正确率 {{ formatPercent(weak.accuracyRate) }}%
+                                    </div>
+                                </div>
+                                <div v-else class="evidence-text">本周期暂无明显薄弱知识点。</div>
+                            </div>
+                            <div class="metric-box">
+                                <div class="post-title">下阶段动作</div>
+                                <div v-for="action in periodReport.actions" :key="action" class="evidence-text" style="margin-top: 8px;">
+                                    {{ action }}
                                 </div>
                             </div>
                         </div>
@@ -1850,8 +1985,8 @@
                 <div v-if="postDetail">
                     <div style="margin-bottom: 15px; color: #909399; font-size: 13px;">
                         <span>{{ postDetail.authorName }}</span> ·
+                        <span>{{ postDetail.viewCount }}次浏览</span> ·
                         <span>{{ postDetail.likeCount }}点赞</span>
-                        <button class="btn-secondary" style="padding: 4px 10px; font-size: 12px; margin-left: 8px;" @click="likePost(postDetail)">{{ postDetail.liked ? '❤️ 已赞' : '👍 点赞' }}</button>
                     </div>
                     <div style="padding: 15px; background: #f8fafc; border-radius: 8px; margin-bottom: 20px;">
                         {{ postDetail.content }}
@@ -1976,18 +2111,6 @@
             }
         })();
 
-        // axios 请求拦截器 - 每次请求自动带token
-        axios.interceptors.request.use(
-            config => {
-                const token = localStorage.getItem('token');
-                if (token) {
-                    config.headers['Authorization'] = `Bearer ${token}`;
-                }
-                return config;
-            },
-            error => Promise.reject(error)
-        );
-
         // axios 响应拦截器 - 401时自动清除登录状态
         axios.interceptors.response.use(
             response => response,
@@ -2031,11 +2154,11 @@
                     selectedAnalyticsMasterySubject: 'all',
                     courses: [],
                     posts: [],
-                    postKeyword: '',
-                    postSort: 'latest',
                     notes: [],
                     mistakes: [],
                     analytics: {},
+                    periodReport: {},
+                    reportPeriod: 'week',
                     learningPath: {
                         profile: null,
                         stageGoal: null,
@@ -2104,6 +2227,7 @@
                     previewUrl: null,
                     scanSubjectId: '',
                     isScanning: false,
+                    scanStatusText: 'AI识别中...',
                     scanResult: null,
 
                     // 个人中心相关
@@ -2297,7 +2421,20 @@
                         this.stats.accuracy = this.formatPercent(this.analytics.overallStats?.accuracyRate);
                         this.stats.streak = this.analytics.overallStats?.streakDays || 0;
                         this.knowledgeHeatmap = this.analytics.knowledgeHeatmap || [];
+                        this.loadPeriodReport(this.reportPeriod);
                     } catch (e) {}
+                },
+
+                async loadPeriodReport(period = this.reportPeriod) {
+                    this.reportPeriod = period;
+                    try {
+                        const res = await axios.get(`${API_BASE}/api/analytics/period-report`, {
+                            params: { period }
+                        });
+                        this.periodReport = res.data.data || {};
+                    } catch (e) {
+                        this.periodReport = {};
+                    }
                 },
 
                 async loadPersonalizedPath() {
@@ -2384,6 +2521,76 @@
                         KNOWLEDGE_PRACTICE: '专项'
                     };
                     return names[type] || '任务';
+                },
+
+                gradingStatusName(status) {
+                    const names = {
+                        PROCESSING: '处理中',
+                        SUCCESS: '已完成',
+                        FAILED: '失败'
+                    };
+                    return names[status] || '已完成';
+                },
+
+                async completeLearningTask(task) {
+                    if (!task || !task.id) return;
+                    try {
+                        await axios.put(`${API_BASE}/api/learning/tasks/${task.id}/complete`);
+                        task.status = 'COMPLETED';
+                        task.progress = 100;
+                        this.loadPersonalizedPath();
+                    } catch (e) {
+                        alert(e.response?.data?.message || '任务状态更新失败');
+                    }
+                },
+
+                async openLearningTask(task) {
+                    if (!task) return;
+                    if (task.actionRoute === 'note-reflection') {
+                        this.currentPage = 'notes';
+                        this.noteForm = {
+                            title: '学习反思记录',
+                            content: this.learningPath.reflectionPrompt || task.description || '',
+                            isPublic: false
+                        };
+                        this.showNoteModal = true;
+                        return;
+                    }
+
+                    this.currentPage = 'practice';
+                    if (this.subjects.length === 0) {
+                        await this.loadSubjects();
+                    }
+
+                    if (task.actionRoute === 'knowledge-practice' && task.knowledgeId) {
+                        try {
+                            const res = await axios.post(`${API_BASE}/api/practice/generate`, {
+                                practiceType: 'KNOWLEDGE',
+                                knowledgeId: task.knowledgeId,
+                                limit: 5
+                            });
+                            this.currentPractice = res.data.data;
+                            this.currentQuestion = this.currentPractice.questions[0];
+                            this.currentPractice.currentIndex = 0;
+                            this.userAnswer = '';
+                            this.multiAnswers = [];
+                            this.showPracticeResult = false;
+                            this.practiceAnswerResult = null;
+                            this.currentPracticeType = null;
+                        } catch (e) {
+                            alert(e.response?.data?.message || '生成知识点练习失败');
+                        }
+                        return;
+                    }
+
+                    if (task.actionRoute === 'mistake-practice') {
+                        await this.startMistakePractice();
+                        return;
+                    }
+
+                    if (!this.selectedSubjectId && this.subjects.length > 0) {
+                        this.selectedSubjectId = this.subjects[0].id;
+                    }
                 },
 
                 trendHeight(count, counts = []) {
@@ -2525,15 +2732,6 @@
                 },
 
                 async createPost() {
-                    // 前端先行校验
-                    if (!this.postForm.title || !this.postForm.title.trim()) {
-                        alert('请输入帖子标题');
-                        return;
-                    }
-                    if (!this.postForm.content || !this.postForm.content.trim()) {
-                        alert('请输入帖子内容');
-                        return;
-                    }
                     try {
                         await axios.post(`${API_BASE}/api/community/posts`, this.postForm);
                         alert('发布成功');
@@ -2541,14 +2739,7 @@
                         this.postForm = { title: '', content: '', anonymous: false };
                         this.loadPosts();
                     } catch (error) {
-                        const data = error.response?.data;
-                        if (data?.data && typeof data.data === 'object') {
-                            // 显示具体的字段校验错误
-                            const fields = Object.values(data.data).join('；');
-                            alert(fields);
-                        } else {
-                            alert(data?.message || '发布失败');
-                        }
+                        alert(error.response?.data?.message || '发布失败');
                     }
                 },
 
@@ -2566,9 +2757,7 @@
 
                 async loadPosts() {
                     try {
-                        const params = { sort: this.postSort, page: 1, size: 20 };
-                        if (this.postKeyword.trim()) params.keyword = this.postKeyword.trim();
-                        const res = await axios.get(`${API_BASE}/api/community/public/posts`, { params });
+                        const res = await axios.get(`${API_BASE}/api/community/public/posts`);
                         this.posts = res.data.data?.records || [];
                     } catch (e) {}
                 },
@@ -2876,13 +3065,7 @@
                 async loadPostDetail(postId) {
                     try {
                         const res = await axios.get(`${API_BASE}/api/community/public/posts/${postId}`);
-                        const d = res.data.data;
-                        // 后端返回 PostDetailResponse { post, comments }，扁平化为旧格式兼容模板
-                        if (d.post) {
-                            this.postDetail = { ...d.post, comments: d.comments };
-                        } else {
-                            this.postDetail = d;
-                        }
+                        this.postDetail = res.data.data;
                     } catch (e) {
                         alert('加载失败');
                     }
@@ -3046,10 +3229,12 @@
                     }
 
                     this.isScanning = true;
+                    this.scanStatusText = '上传中...';
                     const formData = new FormData();
                     formData.append('file', this.selectedFile);
 
                     try {
+                        this.scanStatusText = 'OCR识别和AI判卷中...';
                         const res = await axios.post(`${API_BASE}/api/grading/scan`, formData, {
                             headers: { 'Content-Type': 'multipart/form-data' }
                         });
@@ -3059,6 +3244,7 @@
                         alert(error.response?.data?.message || '识别失败，请重试');
                     } finally {
                         this.isScanning = false;
+                        this.scanStatusText = 'AI识别中...';
                     }
                 },
 

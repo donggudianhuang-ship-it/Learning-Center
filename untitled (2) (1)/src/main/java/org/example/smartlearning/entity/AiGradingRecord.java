@@ -38,7 +38,15 @@ public class AiGradingRecord {
 
     private String resultJson;
 
+    private String ocrText;
+
     private String originalFileName;
 
+    private String status;
+
+    private String errorMessage;
+
     private LocalDateTime createdAt;
+
+    private LocalDateTime updatedAt;
 }

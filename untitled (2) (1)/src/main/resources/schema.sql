@@ -147,10 +147,41 @@ CREATE TABLE IF NOT EXISTS ai_grading_record (
     correct_count INT DEFAULT 0,
     wrong_count INT DEFAULT 0,
     result_json LONGTEXT NOT NULL,
+    ocr_text LONGTEXT,
     original_file_name VARCHAR(255),
+    status VARCHAR(20) DEFAULT 'SUCCESS',
+    error_message TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES user(id),
     INDEX idx_ai_grading_record_user_created (user_id, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Personalized learning task table
+CREATE TABLE IF NOT EXISTS learning_task (
+    id BIGINT PRIMARY KEY AUTO_INCREMENT,
+    user_id BIGINT NOT NULL,
+    task_key VARCHAR(120) NOT NULL,
+    task_type VARCHAR(50) NOT NULL,
+    title VARCHAR(200) NOT NULL,
+    description TEXT,
+    knowledge_id BIGINT,
+    knowledge_name VARCHAR(100),
+    question_ids TEXT,
+    action_route VARCHAR(50),
+    priority INT DEFAULT 1,
+    estimated_minutes INT DEFAULT 15,
+    progress DECIMAL(5,2) DEFAULT 0,
+    target_progress DECIMAL(5,2),
+    status VARCHAR(20) DEFAULT 'PENDING',
+    deadline DATE,
+    completed_at DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES user(id),
+    FOREIGN KEY (knowledge_id) REFERENCES knowledge_point(id),
+    UNIQUE KEY uk_learning_task_user_key (user_id, task_key),
+    INDEX idx_learning_task_user_status (user_id, status, deadline)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- Mistake book table
@@ -250,8 +281,7 @@ CREATE TABLE IF NOT EXISTS community_post (
     FOREIGN KEY (subject_id) REFERENCES subject(id),
     INDEX idx_user (user_id),
     INDEX idx_subject (subject_id),
-    INDEX idx_created (created_at),
-    FULLTEXT INDEX ft_post_search (title, content) WITH PARSER ngram
+    INDEX idx_created (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- Post comment table

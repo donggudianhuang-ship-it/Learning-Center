@@ -7,6 +7,8 @@ import org.example.smartlearning.service.analytics.AnalyticsService;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.Map;
+
 /**
  * 学情分析控制器
  */
@@ -20,5 +22,12 @@ public class AnalyticsController {
     @GetMapping("/report")
     public ApiResponse<LearningAnalyticsResponse> getLearningReport(@AuthenticationPrincipal Long userId) {
         return ApiResponse.success(analyticsService.getLearningAnalytics(userId));
+    }
+
+    @GetMapping("/period-report")
+    public ApiResponse<Map<String, Object>> getPeriodReport(
+            @AuthenticationPrincipal Long userId,
+            @RequestParam(value = "period", defaultValue = "week") String period) {
+        return ApiResponse.success(analyticsService.getPeriodReport(userId, period));
     }
 }

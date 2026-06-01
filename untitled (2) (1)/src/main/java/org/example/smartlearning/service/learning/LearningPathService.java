@@ -1,5 +1,6 @@
 package org.example.smartlearning.service.learning;
 
+import com.alibaba.fastjson2.JSON;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import lombok.RequiredArgsConstructor;
 import org.example.smartlearning.entity.*;
@@ -29,6 +30,7 @@ public class LearningPathService {
     private final UserMapper userMapper;
     private final KnowledgeTaggingService knowledgeTaggingService;
     private final PracticeRecordMapper practiceRecordMapper;
+    private final LearningTaskMapper learningTaskMapper;
 
     /**
      * 获取错题本列表
@@ -282,12 +284,44 @@ public class LearningPathService {
         stageGoal.put("deadline", LocalDate.now().plusDays(7));
         result.put("stageGoal", stageGoal);
 
-        result.put("tasks", buildPathTasks(weakMasteries, dueReviews, total, accuracyRate, recentAccuracyRate, coverageRate));
+        List<Map<String, Object>> generatedTasks = buildPathTasks(weakMasteries, dueReviews, total,
+                accuracyRate, recentAccuracyRate, coverageRate);
+        result.put("tasks", syncLearningTasks(userId, generatedTasks));
         result.put("pathSteps", buildPathSteps(weakMasteries, dueReviews, total, accuracyRate, coverageRate));
         result.put("reflectionPrompt", buildReflectionPrompt(accuracyRate, dueReviews.size(), weakMasteries));
         result.put("recentMistakes", getRecentMistakes(userId));
 
         return result;
+    }
+
+    /**
+     * 获取当前学习路径任务。
+     */
+    public List<Map<String, Object>> getLearningTasks(Long userId) {
+        return learningTaskMapper.selectList(
+                new LambdaQueryWrapper<LearningTask>()
+                        .eq(LearningTask::getUserId, userId)
+                        .orderByAsc(LearningTask::getStatus)
+                        .orderByAsc(LearningTask::getPriority)
+                        .orderByAsc(LearningTask::getDeadline)
+                        .last("LIMIT 20")
+        ).stream().map(this::taskToMap).collect(Collectors.toList());
+    }
+
+    /**
+     * 手动标记路径任务完成。
+     */
+    @Transactional
+    public void completeLearningTask(Long userId, Long taskId) {
+        LearningTask task = learningTaskMapper.selectById(taskId);
+        if (task == null || !Objects.equals(task.getUserId(), userId)) {
+            throw new RuntimeException("学习任务不存在");
+        }
+        task.setStatus("COMPLETED");
+        task.setProgress(BigDecimal.valueOf(100));
+        task.setCompletedAt(LocalDateTime.now());
+        task.setUpdatedAt(LocalDateTime.now());
+        learningTaskMapper.updateById(task);
     }
 
     /**
@@ -411,6 +445,166 @@ public class LearningPathService {
         progress.put("masteredKnowledge", masteredKnowledge);
 
         return progress;
+    }
+
+    private List<Map<String, Object>> syncLearningTasks(Long userId, List<Map<String, Object>> generatedTasks) {
+        LocalDate today = LocalDate.now();
+        List<Map<String, Object>> synced = new ArrayList<>();
+        int priority = 1;
+
+        for (Map<String, Object> generated : generatedTasks) {
+            String taskType = String.valueOf(generated.getOrDefault("type", "TASK"));
+            Long knowledgeId = asLong(generated.get("knowledgeId"));
+            String taskKey = buildTaskKey(taskType, knowledgeId, today);
+
+            LearningTask task = learningTaskMapper.selectOne(
+                    new LambdaQueryWrapper<LearningTask>()
+                            .eq(LearningTask::getUserId, userId)
+                            .eq(LearningTask::getTaskKey, taskKey)
+                            .last("LIMIT 1")
+            );
+
+            if (task == null) {
+                task = new LearningTask();
+                task.setUserId(userId);
+                task.setTaskKey(taskKey);
+                task.setStatus("PENDING");
+                task.setCreatedAt(LocalDateTime.now());
+            }
+
+            if (!"COMPLETED".equals(task.getStatus())) {
+                task.setTaskType(taskType);
+                task.setTitle(String.valueOf(generated.getOrDefault("title", "学习任务")));
+                task.setDescription(String.valueOf(generated.getOrDefault("description", "")));
+                task.setKnowledgeId(knowledgeId);
+                task.setKnowledgeName((String) generated.get("knowledgeName"));
+                task.setQuestionIds(JSON.toJSONString(generated.getOrDefault("questionIds", List.of())));
+                task.setActionRoute(buildActionRoute(taskType));
+                task.setPriority(priority++);
+                task.setEstimatedMinutes(asInteger(generated.get("estimatedMinutes"), 15));
+                task.setProgress(asBigDecimal(generated.get("progress")));
+                task.setTargetProgress(asBigDecimal(generated.get("targetProgress")));
+                task.setDeadline(buildTaskDeadline(taskType, today));
+                task.setUpdatedAt(LocalDateTime.now());
+
+                if (task.getId() == null) {
+                    learningTaskMapper.insert(task);
+                } else {
+                    learningTaskMapper.updateById(task);
+                }
+            }
+
+            synced.add(taskToMap(task));
+        }
+
+        return synced.stream()
+                .sorted(Comparator
+                        .comparing((Map<String, Object> task) -> "COMPLETED".equals(task.get("status")) ? 1 : 0)
+                        .thenComparing(task -> (Integer) task.getOrDefault("priority", 99)))
+                .collect(Collectors.toList());
+    }
+
+    private String buildTaskKey(String taskType, Long knowledgeId, LocalDate today) {
+        String scope = switch (taskType) {
+            case "PRACTICE" -> "K" + (knowledgeId == null ? "GENERAL" : knowledgeId);
+            case "REVIEW", "RECENT_ERROR_REVIEW", "REFLECTION", "DIAGNOSIS" -> today.toString();
+            default -> today.with(java.time.DayOfWeek.MONDAY).toString();
+        };
+        return taskType + ":" + scope;
+    }
+
+    private String buildActionRoute(String taskType) {
+        return switch (taskType) {
+            case "REVIEW", "RECENT_ERROR_REVIEW" -> "mistake-practice";
+            case "PRACTICE" -> "knowledge-practice";
+            case "REFLECTION" -> "note-reflection";
+            default -> "practice";
+        };
+    }
+
+    private LocalDate buildTaskDeadline(String taskType, LocalDate today) {
+        return switch (taskType) {
+            case "REVIEW", "RECENT_ERROR_REVIEW", "REFLECTION" -> today;
+            case "DIAGNOSIS" -> today.plusDays(1);
+            default -> today.plusDays(7);
+        };
+    }
+
+    private Map<String, Object> taskToMap(LearningTask task) {
+        Map<String, Object> item = new LinkedHashMap<>();
+        item.put("id", task.getId());
+        item.put("taskKey", task.getTaskKey());
+        item.put("type", task.getTaskType());
+        item.put("title", task.getTitle());
+        item.put("description", task.getDescription());
+        item.put("knowledgeId", task.getKnowledgeId());
+        item.put("knowledgeName", task.getKnowledgeName());
+        item.put("questionIds", parseQuestionIds(task.getQuestionIds()));
+        item.put("actionRoute", task.getActionRoute());
+        item.put("priority", task.getPriority());
+        item.put("estimatedMinutes", task.getEstimatedMinutes());
+        item.put("progress", task.getProgress());
+        item.put("targetProgress", task.getTargetProgress());
+        item.put("status", task.getStatus());
+        item.put("deadline", task.getDeadline());
+        item.put("completedAt", task.getCompletedAt());
+        return item;
+    }
+
+    private List<Long> parseQuestionIds(String value) {
+        if (value == null || value.isBlank()) {
+            return List.of();
+        }
+        try {
+            return JSON.parseArray(value, Long.class);
+        } catch (Exception ignored) {
+            return List.of();
+        }
+    }
+
+    private Long asLong(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof Number number) {
+            return number.longValue();
+        }
+        try {
+            return Long.parseLong(String.valueOf(value));
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
+    }
+
+    private Integer asInteger(Object value, int defaultValue) {
+        if (value == null) {
+            return defaultValue;
+        }
+        if (value instanceof Number number) {
+            return number.intValue();
+        }
+        try {
+            return Integer.parseInt(String.valueOf(value));
+        } catch (NumberFormatException ignored) {
+            return defaultValue;
+        }
+    }
+
+    private BigDecimal asBigDecimal(Object value) {
+        if (value == null) {
+            return BigDecimal.ZERO;
+        }
+        if (value instanceof BigDecimal decimal) {
+            return decimal.setScale(1, RoundingMode.HALF_UP);
+        }
+        if (value instanceof Number number) {
+            return BigDecimal.valueOf(number.doubleValue()).setScale(1, RoundingMode.HALF_UP);
+        }
+        try {
+            return new BigDecimal(String.valueOf(value)).setScale(1, RoundingMode.HALF_UP);
+        } catch (NumberFormatException ignored) {
+            return BigDecimal.ZERO;
+        }
     }
 
     private List<Map<String, Object>> buildPathTasks(List<KnowledgeMastery> weakMasteries,

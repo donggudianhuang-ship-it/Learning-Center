@@ -27,6 +27,21 @@ public class ScanGradingResponse {
     private LocalDateTime createdAt;
 
     /**
+     * 判卷状态：PROCESSING/SUCCESS/FAILED
+     */
+    private String status;
+
+    /**
+     * 失败原因
+     */
+    private String errorMessage;
+
+    /**
+     * OCR识别文本，详情页用于排查识别问题
+     */
+    private String ocrText;
+
+    /**
      * AI识别出的科目
      */
     private String subject;

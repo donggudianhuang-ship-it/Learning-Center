@@ -103,6 +103,79 @@ public class AnalyticsService {
         return response;
     }
 
+    /**
+     * 获取周报/月报。周报统计近7天，月报统计近30天。
+     */
+    public Map<String, Object> getPeriodReport(Long userId, String period) {
+        boolean monthly = "month".equalsIgnoreCase(period) || "monthly".equalsIgnoreCase(period);
+        int days = monthly ? 30 : 7;
+        LocalDate today = LocalDate.now();
+        LocalDate startDate = today.minusDays(days - 1L);
+        LocalDateTime start = startDate.atStartOfDay();
+        LocalDateTime end = today.plusDays(1).atStartOfDay();
+
+        List<AnswerRecord> records = answerRecordMapper.selectList(
+                new LambdaQueryWrapper<AnswerRecord>()
+                        .eq(AnswerRecord::getUserId, userId)
+                        .ge(AnswerRecord::getCreatedAt, start)
+                        .lt(AnswerRecord::getCreatedAt, end)
+                        .orderByAsc(AnswerRecord::getCreatedAt)
+        );
+        List<MistakeBook> mistakes = mistakeBookMapper.selectList(
+                new LambdaQueryWrapper<MistakeBook>()
+                        .eq(MistakeBook::getUserId, userId)
+        );
+        List<MistakeBook> newMistakes = mistakes.stream()
+                .filter(mistake -> mistake.getCreatedAt() != null
+                        && !mistake.getCreatedAt().isBefore(start)
+                        && mistake.getCreatedAt().isBefore(end))
+                .collect(Collectors.toList());
+        List<PracticeRecord> completedPractices = practiceRecordMapper.selectList(
+                new LambdaQueryWrapper<PracticeRecord>()
+                        .eq(PracticeRecord::getUserId, userId)
+                        .eq(PracticeRecord::getStatus, 1)
+                        .ge(PracticeRecord::getEndTime, start)
+                        .lt(PracticeRecord::getEndTime, end)
+        );
+        List<KnowledgeMastery> masteries = knowledgeMasteryMapper.selectList(
+                new LambdaQueryWrapper<KnowledgeMastery>()
+                        .eq(KnowledgeMastery::getUserId, userId)
+                        .orderByAsc(KnowledgeMastery::getMasteryLevel)
+        );
+
+        long correct = records.stream().filter(this::isCorrect).count();
+        int studyMinutes = completedPractices.stream()
+                .map(PracticeRecord::getDuration)
+                .filter(Objects::nonNull)
+                .mapToInt(Integer::intValue)
+                .sum();
+        if (studyMinutes > 0) {
+            studyMinutes = Math.max(1, (int) Math.ceil(studyMinutes / 60.0));
+        } else {
+            studyMinutes = records.size() * 5;
+        }
+
+        Map<String, Object> report = new LinkedHashMap<>();
+        report.put("period", monthly ? "month" : "week");
+        report.put("periodName", monthly ? "近30天学习月报" : "近7天学习周报");
+        report.put("startDate", startDate);
+        report.put("endDate", today);
+        report.put("questionCount", records.size());
+        report.put("correctCount", correct);
+        report.put("accuracyRate", percent(correct, records.size()));
+        report.put("studyMinutes", studyMinutes);
+        report.put("practiceCount", completedPractices.size());
+        report.put("newMistakeCount", newMistakes.size());
+        report.put("dueReviewCount", mistakes.stream().filter(this::isDueReview).count());
+        report.put("trend", buildPeriodTrend(records, days));
+        report.put("weakPoints", buildPeriodWeakPoints(records));
+        report.put("improvedKnowledge", buildImprovedKnowledge(masteries, start));
+        report.put("mistakeTypeStats", buildMistakeTypeStats(newMistakes));
+        report.put("summary", buildPeriodSummary(monthly, records.size(), correct, newMistakes.size(), masteries));
+        report.put("actions", buildPeriodActions(records, newMistakes, masteries));
+        return report;
+    }
+
     private LearningAnalyticsResponse.OverallStats buildOverallStats(List<AnswerRecord> records,
                                                                      List<KnowledgeMastery> masteries,
                                                                      List<MistakeBook> mistakes,
@@ -287,6 +360,129 @@ public class AnalyticsService {
         trend.setCorrectCounts(correctCounts);
         trend.setAccuracyRates(accuracyRates);
         return trend;
+    }
+
+    private LearningAnalyticsResponse.LearningTrend buildPeriodTrend(List<AnswerRecord> records, int days) {
+        LearningAnalyticsResponse.LearningTrend trend = new LearningAnalyticsResponse.LearningTrend();
+        LocalDate today = LocalDate.now();
+        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("MM-dd");
+        Map<LocalDate, List<AnswerRecord>> recordsByDate = records.stream()
+                .filter(record -> record.getCreatedAt() != null)
+                .collect(Collectors.groupingBy(record -> record.getCreatedAt().toLocalDate()));
+
+        List<String> dates = new ArrayList<>();
+        List<Integer> questionCounts = new ArrayList<>();
+        List<Integer> correctCounts = new ArrayList<>();
+        List<BigDecimal> accuracyRates = new ArrayList<>();
+
+        for (int i = days - 1; i >= 0; i--) {
+            LocalDate date = today.minusDays(i);
+            List<AnswerRecord> daily = recordsByDate.getOrDefault(date, List.of());
+            long correct = daily.stream().filter(this::isCorrect).count();
+            dates.add(date.format(formatter));
+            questionCounts.add(daily.size());
+            correctCounts.add((int) correct);
+            accuracyRates.add(percent(correct, daily.size()));
+        }
+
+        trend.setDates(dates);
+        trend.setQuestionCounts(questionCounts);
+        trend.setCorrectCounts(correctCounts);
+        trend.setAccuracyRates(accuracyRates);
+        return trend;
+    }
+
+    private List<Map<String, Object>> buildPeriodWeakPoints(List<AnswerRecord> records) {
+        Map<Long, int[]> statsByKnowledge = new HashMap<>();
+        for (AnswerRecord record : records) {
+            Question question = questionMapper.selectById(record.getQuestionId());
+            for (Long knowledgeId : knowledgeTaggingService.resolveKnowledgeIds(question)) {
+                int[] stats = statsByKnowledge.computeIfAbsent(knowledgeId, ignored -> new int[2]);
+                stats[0]++;
+                if (isCorrect(record)) {
+                    stats[1]++;
+                }
+            }
+        }
+
+        return statsByKnowledge.entrySet().stream()
+                .filter(entry -> entry.getValue()[0] > entry.getValue()[1])
+                .sorted(Comparator
+                        .comparing((Map.Entry<Long, int[]> entry) -> entry.getValue()[0] - entry.getValue()[1])
+                        .reversed())
+                .limit(5)
+                .map(entry -> {
+                    int total = entry.getValue()[0];
+                    int correct = entry.getValue()[1];
+                    Map<String, Object> item = new LinkedHashMap<>();
+                    item.put("knowledgeId", entry.getKey());
+                    item.put("knowledgeName", getKnowledgeName(new HashMap<>(), entry.getKey()));
+                    item.put("questionCount", total);
+                    item.put("wrongCount", total - correct);
+                    item.put("accuracyRate", percent(correct, total));
+                    item.put("suggestion", "先复盘本周期错题，再补做同知识点基础题。");
+                    return item;
+                })
+                .collect(Collectors.toList());
+    }
+
+    private List<Map<String, Object>> buildImprovedKnowledge(List<KnowledgeMastery> masteries, LocalDateTime start) {
+        return masteries.stream()
+                .filter(mastery -> mastery.getLastPracticeAt() != null && !mastery.getLastPracticeAt().isBefore(start))
+                .filter(mastery -> masteryValue(mastery) >= 60)
+                .sorted(Comparator.comparing(KnowledgeMastery::getMasteryLevel).reversed())
+                .limit(5)
+                .map(mastery -> {
+                    Map<String, Object> item = new LinkedHashMap<>();
+                    item.put("knowledgeId", mastery.getKnowledgeId());
+                    item.put("knowledgeName", getKnowledgeName(new HashMap<>(), mastery.getKnowledgeId()));
+                    item.put("masteryLevel", normalize(mastery.getMasteryLevel()));
+                    item.put("totalQuestions", Optional.ofNullable(mastery.getTotalQuestions()).orElse(0));
+                    item.put("correctQuestions", Optional.ofNullable(mastery.getCorrectQuestions()).orElse(0));
+                    return item;
+                })
+                .collect(Collectors.toList());
+    }
+
+    private String buildPeriodSummary(boolean monthly,
+                                      int questionCount,
+                                      long correctCount,
+                                      int newMistakeCount,
+                                      List<KnowledgeMastery> masteries) {
+        if (questionCount == 0) {
+            return (monthly ? "近30天" : "近7天") + "还没有答题记录，建议先完成一组专项练习形成报告数据。";
+        }
+        String topWeak = masteries.stream()
+                .filter(mastery -> masteryValue(mastery) < 80)
+                .min(Comparator.comparingDouble(this::masteryValue))
+                .map(mastery -> getKnowledgeName(new HashMap<>(), mastery.getKnowledgeId()))
+                .orElse("暂无明显薄弱点");
+        return (monthly ? "近30天" : "近7天") + "完成 " + questionCount + " 道题，正确率 "
+                + percent(correctCount, questionCount) + "%，新增错题 " + newMistakeCount
+                + " 道。下一步建议重点关注：" + topWeak + "。";
+    }
+
+    private List<String> buildPeriodActions(List<AnswerRecord> records,
+                                            List<MistakeBook> newMistakes,
+                                            List<KnowledgeMastery> masteries) {
+        List<String> actions = new ArrayList<>();
+        long dueReview = newMistakes.stream().filter(this::isDueReview).count();
+        if (dueReview > 0) {
+            actions.add("先完成 " + dueReview + " 道到期错题复盘。");
+        }
+        masteries.stream()
+                .filter(mastery -> masteryValue(mastery) < 75)
+                .sorted(Comparator.comparingDouble(this::masteryValue))
+                .limit(2)
+                .forEach(mastery -> actions.add("针对 " + getKnowledgeName(new HashMap<>(), mastery.getKnowledgeId())
+                        + " 做一组知识点专项练习。"));
+        if (records.size() < 10) {
+            actions.add("本周期答题样本偏少，先补到 10 道以上让诊断更稳。");
+        }
+        if (actions.isEmpty()) {
+            actions.add("保持当前节奏，下一轮增加限时综合练习。");
+        }
+        return actions;
     }
 
     private LearningAnalyticsResponse.LearningDiagnosis buildDiagnosis(LearningAnalyticsResponse.OverallStats stats,
