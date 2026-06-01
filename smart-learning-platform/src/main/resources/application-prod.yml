@@ -1,0 +1,88 @@
+spring:
+  application:
+    name: smart-learning-platform
+
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://${MYSQL_HOST:localhost}:${MYSQL_PORT:3306}/${MYSQL_DATABASE:smart_learning}?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false
+    username: ${MYSQL_USER:root}
+    password: ${MYSQL_PASSWORD:123456}
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 5
+      idle-timeout: 300000
+      connection-timeout: 10000
+
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      database: 0
+      timeout: 10000ms
+      lettuce:
+        pool:
+          max-active: 16
+          max-idle: 8
+          min-idle: 4
+
+  servlet:
+    multipart:
+      max-file-size: ${UPLOAD_MAX_SIZE:50MB}
+      max-request-size: ${UPLOAD_MAX_SIZE:50MB}
+
+server:
+  port: ${SERVER_PORT:8081}
+  compression:
+    enabled: true
+    mime-types: application/json,text/html,text/plain,text/css,application/javascript
+
+mybatis-plus:
+  mapper-locations: classpath:mapper/*.xml
+  type-aliases-package: org.example.smartlearning.entity
+  configuration:
+    map-underscore-to-camel-case: true
+
+# JWT
+jwt:
+  secret: ${JWT_SECRET:SmartLearningPlatformSecretKey2024VeryLongSecretKeyForJWT}
+  expiration: ${JWT_EXPIRATION:86400000}
+
+# DeepSeek API
+claude:
+  api-key: ${DEEPSEEK_API_KEY:}
+  model: ${DEEPSEEK_MODEL:deepseek-chat}
+  max-tokens: 4096
+  api-url: https://api.deepseek.com/v1/chat/completions
+  vision-model: deepseek-chat
+
+# MinIO
+minio:
+  endpoint: ${MINIO_ENDPOINT:http://localhost:9000}
+  access-key: ${MINIO_ACCESS_KEY:minioadmin}
+  secret-key: ${MINIO_SECRET_KEY:minioadmin}
+  bucket-name: ${MINIO_BUCKET:smart-learning}
+
+# OCR
+ocr:
+  tessdata-path: ${TESSDATA_PATH:./tessdata}
+  language: chi_sim+eng
+
+# Actuator 健康检查（Docker HEALTHCHECK / K8s probe 用）
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: false
+  health:
+    redis:
+      enabled: false
+
+logging:
+  level:
+    org.example.smartlearning: ${LOG_LEVEL:INFO}
+    org.springframework.security: WARN
+    com.baomidou.mybatisplus: WARN
